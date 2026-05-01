@@ -49,9 +49,10 @@ export default function ViewerPage() {
       .then((r) => r.json())
       .then((data) => {
         if (data.error) throw new Error(data.error);
+        const proxiedUrl = `/api/stream-video?url=${encodeURIComponent(data.videoUrl as string)}`;
         setVideoData({
           ...data,
-          videoUrl: `/api/stream-video?videoId=${videoId}`,
+          videoUrl: proxiedUrl,
         });
         setPhase("ready");
       })
