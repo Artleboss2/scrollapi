@@ -1,57 +1,41 @@
 import { NextRequest, NextResponse } from "next/server";
+import { spawn } from "child_process";
+import path from "path";
 
-export const maxDuration = 30;
+function runPython(args: string[]): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const scriptPath = path.join(process.cwd(), "scripts", "fetch_video.py");
+    const proc = spawn("python3", [scriptPath, ...args]);
+    let stdout = "";
+    let stderr = "";
+    proc.stdout.on("data", (d: Buffer) => (stdout += d.toString()));
+    proc.stderr.on("data", (d: Buffer) => (stderr += d.toString()));
+    proc.on("close", (code: number) => {
+      try {
+        const result = JSON.parse(stdout.trim());
+        if (result.error) reject(new Error(result.error));
+        else resolve(result);
+      } catch {
+        reject(new Error(`Code ${code}: ${stderr.slice(0, 200)}`));
+      }
+    });
+    proc.on("error", (err: Error) => reject(err));
+  });
+}
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
-  const streamUrl = searchParams.get("url");
+  const videoId = searchParams.get("videoId");
 
-  if (!streamUrl) {
-    return new NextResponse("Missing url parameter", { status: 400 });
-  }
-
-  let decoded: string;
-  try {
-    decoded = decodeURIComponent(streamUrl);
-    new URL(decoded);
-  } catch {
-    return new NextResponse("Invalid url", { status: 400 });
-  }
-
-  const rangeHeader = request.headers.get("range");
-
-  const fetchHeaders: Record<string, string> = {
-    "User-Agent":
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Referer": "https://www.youtube.com/",
-    "Origin": "https://www.youtube.com",
-  };
-
-  if (rangeHeader) {
-    fetchHeaders["Range"] = rangeHeader;
+  if (!videoId || !/^[a-zA-Z0-9_-]{11}$/.test(videoId)) {
+    return NextResponse.json({ error: "Invalid videoId" }, { status: 400 });
   }
 
   try {
-    const upstream = await fetch(decoded, { headers: fetchHeaders });
-
-    const responseHeaders = new Headers();
-    responseHeaders.set("Content-Type", upstream.headers.get("Content-Type") ?? "video/mp4");
-    responseHeaders.set("Accept-Ranges", "bytes");
-    responseHeaders.set("Access-Control-Allow-Origin", "*");
-    responseHeaders.set("Cache-Control", "public, max-age=3600");
-
-    const contentLength = upstream.headers.get("Content-Length");
-    if (contentLength) responseHeaders.set("Content-Length", contentLength);
-
-    const contentRange = upstream.headers.get("Content-Range");
-    if (contentRange) responseHeaders.set("Content-Range", contentRange);
-
-    return new NextResponse(upstream.body, {
-      status: upstream.status,
-      headers: responseHeaders,
-    });
+    const result = await runPython(["cached_path", videoId]);
+    return NextResponse.json(result);
   } catch (error) {
-    const msg = error instanceof Error ? error.message : "Proxy error";
-    return new NextResponse(msg, { status: 502 });
+    const msg = error instanceof Error ? error.message : "Unknown error";
+    return NextResponse.json({ error: msg }, { status: 500 });
   }
 }
