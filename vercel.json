@@ -2,7 +2,7 @@
   "framework": "nextjs",
   "buildCommand": "next build",
   "outputDirectory": ".next",
-  "installCommand": "npm install",
+  "installCommand": "YOUTUBE_DL_SKIP_DOWNLOAD=true npm install",
   "functions": {
     "app/api/**/*.ts": {
       "maxDuration": 30
