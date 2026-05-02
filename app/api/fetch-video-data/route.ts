@@ -1,7 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
-import youtubeDl from "youtube-dl-exec";
 
-export const maxDuration = 30;
+export const maxDuration = 20;
+
+function parseXmlCaptions(xml: string): Array<{ start: number; dur: number; text: string }> {
+  const cues: Array<{ start: number; dur: number; text: string }> = [];
+  const regex = /<text start="([^"]+)" dur="([^"]+)"[^>]*>([\s\S]*?)<\/text>/g;
+  let match;
+  while ((match = regex.exec(xml)) !== null) {
+    const text = match[3]
+      .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/<[^>]+>/g, "").trim();
+    if (text) cues.push({ start: parseFloat(match[1]), dur: parseFloat(match[2]), text });
+  }
+  return cues;
+}
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
@@ -11,77 +23,64 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Invalid videoId" }, { status: 400 });
   }
 
-  const url = `https://www.youtube.com/watch?v=${videoId}`;
-
   try {
-    const info = await youtubeDl(url, {
-      dumpSingleJson: true,
-      noCheckCertificates: true,
-      noWarnings: true,
-      preferFreeFormats: true,
-      addHeaders: ["referer:youtube.com", "user-agent:Mozilla/5.0"],
-    }) as Record<string, unknown>;
+    const res = await fetch("https://www.youtube.com/youtubei/v1/player", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip",
+        "X-YouTube-Client-Name": "3",
+        "X-YouTube-Client-Version": "19.09.37",
+      },
+      body: JSON.stringify({
+        videoId,
+        context: {
+          client: {
+            clientName: "ANDROID",
+            clientVersion: "19.09.37",
+            androidSdkVersion: 30,
+            hl: "en",
+            gl: "US",
+          },
+        },
+      }),
+    });
 
-    const formats = (info.formats as Record<string, unknown>[]) ?? [];
-
-    const videoFormat = formats
-      .filter(
-        (f) =>
-          typeof f.url === "string" &&
-          typeof f.vcodec === "string" &&
-          f.vcodec !== "none" &&
-          typeof f.acodec === "string" &&
-          f.acodec !== "none" &&
-          f.ext === "mp4"
-      )
-      .sort(
-        (a, b) =>
-          ((b.height as number) ?? 0) - ((a.height as number) ?? 0)
-      )[0];
-
-    const videoUrl = (videoFormat?.url as string) ?? "";
-
-    if (!videoUrl) {
-      return NextResponse.json({ error: "No suitable video format found" }, { status: 404 });
-    }
-
-    const rawCaptions = (info.subtitles as Record<string, unknown>) ?? {};
-    const autoCaptions = (info.automatic_captions as Record<string, unknown>) ?? {};
-    const allCaptions = { ...autoCaptions, ...rawCaptions };
+    const data = await res.json();
+    const videoDetails = data.videoDetails ?? {};
+    const captionsRenderer = data.captions?.playerCaptionsTracklistRenderer ?? {};
+    const captionTracks = (captionsRenderer.captionTracks ?? []) as Record<string, unknown>[];
 
     const captions: Array<{ lang: string; langName: string; data: unknown[] }> = [];
 
-    for (const [lang, tracks] of Object.entries(allCaptions)) {
-      if (lang === "live_chat") continue;
-      const trackList = tracks as Array<Record<string, string>>;
-      const vttTrack = trackList.find((t) => t.ext === "vtt" || t.ext === "json3");
-      if (!vttTrack?.url) continue;
-
+    for (const track of captionTracks.slice(0, 6)) {
+      const baseUrl = track.baseUrl as string;
+      if (!baseUrl) continue;
       try {
-        const res = await fetch(vttTrack.url);
-        const text = await res.text();
-        const cues = parseVtt(text);
+        const capRes = await fetch(baseUrl);
+        const xml = await capRes.text();
+        const cues = parseXmlCaptions(xml);
         if (cues.length > 0) {
-          captions.push({ lang, langName: lang, data: cues });
+          captions.push({
+            lang: (track.languageCode as string) ?? "unknown",
+            langName: ((track.name as Record<string, string>)?.simpleText) ?? (track.languageCode as string) ?? "Unknown",
+            data: cues,
+          });
         }
-      } catch {
-        continue;
-      }
-
-      if (captions.length >= 6) break;
+      } catch { continue; }
     }
 
     return NextResponse.json(
       {
         videoId,
-        videoUrl,
+        videoUrl: "",
         metadata: {
           id: videoId,
-          title: (info.title as string) ?? "Unknown",
-          author: (info.uploader as string) ?? (info.channel as string) ?? "Unknown",
-          duration: (info.duration as number) ?? 0,
+          title: (videoDetails.title as string) ?? "Unknown",
+          author: (videoDetails.author as string) ?? "Unknown",
+          duration: parseInt((videoDetails.lengthSeconds as string) ?? "0", 10),
           thumbnail: `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`,
-          description: ((info.description as string) ?? "").slice(0, 300),
+          description: ((videoDetails.shortDescription as string) ?? "").slice(0, 300),
         },
         captions,
       },
@@ -91,44 +90,4 @@ export async function GET(request: NextRequest) {
     const msg = error instanceof Error ? error.message : "Unknown error";
     return NextResponse.json({ error: msg }, { status: 500 });
   }
-}
-
-function parseVtt(text: string): Array<{ start: number; dur: number; text: string }> {
-  const cues: Array<{ start: number; dur: number; text: string }> = [];
-  const lines = text.split("\n");
-  let i = 0;
-
-  while (i < lines.length) {
-    if (lines[i].includes("-->")) {
-      const [startStr, endStr] = lines[i].split("-->").map((s) => s.trim().split(" ")[0]);
-      const start = vttToSeconds(startStr);
-      const end = vttToSeconds(endStr);
-      const textLines: string[] = [];
-      i++;
-      while (i < lines.length && lines[i].trim() !== "") {
-        const clean = lines[i]
-          .replace(/<[^>]+>/g, "")
-          .replace(/&amp;/g, "&")
-          .replace(/&lt;/g, "<")
-          .replace(/&gt;/g, ">")
-          .replace(/&nbsp;/g, " ")
-          .trim();
-        if (clean) textLines.push(clean);
-        i++;
-      }
-      const joined = textLines.join(" ");
-      if (joined) cues.push({ start, dur: end - start, text: joined });
-    } else {
-      i++;
-    }
-  }
-
-  return cues;
-}
-
-function vttToSeconds(t: string): number {
-  const parts = t.split(":").map(parseFloat);
-  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
-  if (parts.length === 2) return parts[0] * 60 + parts[1];
-  return parts[0];
 }
