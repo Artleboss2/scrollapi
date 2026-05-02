@@ -11,10 +11,7 @@ import { motion, AnimatePresence } from "framer-motion";
 declare global {
   interface Window {
     YT: {
-      Player: new (
-        el: HTMLElement,
-        opts: Record<string, unknown>
-      ) => YTPlayer;
+      Player: new (el: HTMLElement, opts: Record<string, unknown>) => YTPlayer;
       PlayerState: { PLAYING: number; PAUSED: number; ENDED: number };
     };
     onYouTubeIframeAPIReady: () => void;
@@ -49,6 +46,7 @@ export default function ScrollVideoPlayer({ videoData }: ScrollVideoPlayerProps)
   const isReadyRef = useRef(false);
   const lastScrollTimeRef = useRef(performance.now());
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const autoScrollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const [progress, setProgress] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
@@ -58,14 +56,15 @@ export default function ScrollVideoPlayer({ videoData }: ScrollVideoPlayerProps)
   const [showLangSelector, setShowLangSelector] = useState(false);
   const [playbackRate, setPlaybackRate] = useState(0);
   const [isScrolling, setIsScrolling] = useState(false);
+  const [autoSpeed, setAutoSpeed] = useState(1.0);
+  const [isAutoPlaying, setIsAutoPlaying] = useState(false);
+  const [showControls, setShowControls] = useState(false);
 
   const activeCaptions = videoData.captions.find((c) => c.lang === selectedLang)?.data ?? [];
 
   const stopVideo = useCallback(() => {
     if (!playerRef.current || !isReadyRef.current) return;
-    try {
-      playerRef.current.pauseVideo();
-    } catch {}
+    try { playerRef.current.pauseVideo(); } catch {}
     setIsScrolling(false);
     setPlaybackRate(0);
   }, []);
@@ -74,6 +73,31 @@ export default function ScrollVideoPlayer({ videoData }: ScrollVideoPlayerProps)
     if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
     idleTimerRef.current = setTimeout(stopVideo, IDLE_MS);
   }, [stopVideo]);
+
+  const startAutoPlay = useCallback(() => {
+    const player = playerRef.current;
+    if (!player || !isReadyRef.current) return;
+    if (autoScrollRef.current) clearInterval(autoScrollRef.current);
+    try {
+      player.setPlaybackRate(autoSpeed);
+      player.playVideo();
+      setPlaybackRate(autoSpeed);
+      setIsScrolling(true);
+      setIsAutoPlaying(true);
+    } catch {}
+  }, [autoSpeed]);
+
+  const stopAutoPlay = useCallback(() => {
+    if (autoScrollRef.current) clearInterval(autoScrollRef.current);
+    setIsAutoPlaying(false);
+    stopVideo();
+  }, [stopVideo]);
+
+  useEffect(() => {
+    if (isAutoPlaying) {
+      startAutoPlay();
+    }
+  }, [autoSpeed, isAutoPlaying, startAutoPlay]);
 
   const rafLoop = useCallback(() => {
     const player = playerRef.current;
@@ -97,10 +121,7 @@ export default function ScrollVideoPlayer({ videoData }: ScrollVideoPlayerProps)
 
   useEffect(() => {
     const loadApi = () => {
-      if (window.YT?.Player) {
-        initPlayer();
-        return;
-      }
+      if (window.YT?.Player) { initPlayer(); return; }
       const tag = document.createElement("script");
       tag.src = "https://www.youtube.com/iframe_api";
       document.head.appendChild(tag);
@@ -124,6 +145,9 @@ export default function ScrollVideoPlayer({ videoData }: ScrollVideoPlayerProps)
           rel: 0,
           showinfo: 0,
           playsinline: 1,
+          cc_load_policy: 0,
+          cc_lang_pref: "",
+          hl: "en",
         },
         events: {
           onReady: () => {
@@ -140,12 +164,15 @@ export default function ScrollVideoPlayer({ videoData }: ScrollVideoPlayerProps)
       try { playerRef.current?.destroy(); } catch {}
       cancelAnimationFrame(rafRef.current);
       if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
+      if (autoScrollRef.current) clearInterval(autoScrollRef.current);
     };
   }, [videoData.videoId]);
 
   useEffect(() => {
     const handleWheel = (e: WheelEvent) => {
       e.preventDefault();
+      if (isAutoPlaying) stopAutoPlay();
+
       const player = playerRef.current;
       if (!player || !isReadyRef.current) return;
 
@@ -185,6 +212,7 @@ export default function ScrollVideoPlayer({ videoData }: ScrollVideoPlayerProps)
     const handleTouchStart = (e: TouchEvent) => {
       lastTouchY = e.touches[0].clientY;
       lastTouchTime = performance.now();
+      if (isAutoPlaying) stopAutoPlay();
     };
 
     const handleTouchMove = (e: TouchEvent) => {
@@ -233,7 +261,7 @@ export default function ScrollVideoPlayer({ videoData }: ScrollVideoPlayerProps)
       window.removeEventListener("touchmove", handleTouchMove);
       window.removeEventListener("touchend", scheduleStop);
     };
-  }, [scheduleStop]);
+  }, [scheduleStop, isAutoPlaying, stopAutoPlay]);
 
   const rateLabel = (() => {
     if (playbackRate === 0) return null;
@@ -242,16 +270,29 @@ export default function ScrollVideoPlayer({ videoData }: ScrollVideoPlayerProps)
     return `${dir}${abs.toFixed(2)}×`;
   })();
 
+  const SPEED_PRESETS = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
+
   return (
     <div className="relative w-full h-screen overflow-hidden bg-ink">
       <div
         ref={containerRef}
-        className="absolute inset-0 w-full h-full [&>*]:w-full [&>*]:h-full [&_iframe]:w-full [&_iframe]:h-full"
-        style={{ pointerEvents: "none" }}
+        className="absolute w-full h-full [&>*]:w-full [&>*]:h-full [&_iframe]:w-full [&_iframe]:h-full"
+        style={{ pointerEvents: "none", top: 0, left: 0 }}
       />
 
+      <div
+        className="absolute inset-0 z-10"
+        style={{ pointerEvents: "none" }}
+      >
+        <div className="absolute top-0 left-0 right-0 h-16 bg-ink" />
+        <div className="absolute bottom-0 left-0 right-0 h-36 bg-ink" />
+        <div className="absolute top-0 bottom-0 left-0 w-2 bg-ink" />
+        <div className="absolute top-0 bottom-0 right-0 w-2 bg-ink" />
+        <div className="absolute inset-0 bg-gradient-to-t from-ink/40 via-transparent to-transparent" />
+      </div>
+
       {!isReady && (
-        <div className="absolute inset-0 flex items-center justify-center bg-ink z-10">
+        <div className="absolute inset-0 flex items-center justify-center bg-ink z-20">
           <div className="flex flex-col items-center gap-6">
             <div className="relative w-16 h-16">
               <div className="absolute inset-0 border border-accent/30 rounded-full animate-ping" />
@@ -263,12 +304,7 @@ export default function ScrollVideoPlayer({ videoData }: ScrollVideoPlayerProps)
         </div>
       )}
 
-      <div className="absolute inset-0 pointer-events-none z-10">
-        <div className="absolute inset-0 bg-gradient-to-t from-ink/60 via-transparent to-ink/20" />
-        <div className="absolute inset-0 bg-gradient-to-r from-ink/20 via-transparent to-ink/20" />
-      </div>
-
-      <div className="relative z-20">
+      <div className="absolute inset-0 z-20 pointer-events-none">
         <SubtitleDisplay caption={activeCaption} />
         <ProgressIndicator
           progress={progress}
@@ -278,7 +314,7 @@ export default function ScrollVideoPlayer({ videoData }: ScrollVideoPlayerProps)
       </div>
 
       <AnimatePresence>
-        {rateLabel && (
+        {rateLabel && !isAutoPlaying && (
           <motion.div
             key="rate"
             initial={{ opacity: 0, scale: 0.85 }}
@@ -287,7 +323,7 @@ export default function ScrollVideoPlayer({ videoData }: ScrollVideoPlayerProps)
             transition={{ duration: 0.12 }}
             className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-30 pointer-events-none"
           >
-            <div className="px-5 py-2 rounded-xl bg-ink/70 border border-white/10" style={{ boxShadow: "0 8px 32px rgba(0,0,0,0.6)" }}>
+            <div className="px-5 py-2 rounded-xl bg-ink/80 border border-white/10" style={{ boxShadow: "0 8px 32px rgba(0,0,0,0.7)" }}>
               <span className={`font-mono text-2xl tabular-nums ${Math.abs(playbackRate) <= MIN_PLAYBACK + 0.01 ? "text-signal" : Math.abs(playbackRate) >= 1.8 ? "text-accent" : "text-paper"}`}>
                 {rateLabel}
               </span>
@@ -296,34 +332,107 @@ export default function ScrollVideoPlayer({ videoData }: ScrollVideoPlayerProps)
         )}
       </AnimatePresence>
 
-      {videoData.captions.length > 0 && (
-        <div className="absolute top-6 right-6 z-30">
-          <button
-            onClick={() => setShowLangSelector(!showLangSelector)}
-            className="flex items-center gap-2 px-3 py-2 bg-graphite/90 border border-white/8 rounded-lg font-mono text-xs tracking-wider text-mist hover:text-paper transition-colors"
-          >
-            <span className="w-1.5 h-1.5 rounded-full bg-accent" />
-            {selectedLang.toUpperCase()}
-          </button>
-          {showLangSelector && (
-            <LanguageSelector
-              tracks={videoData.captions}
-              selected={selectedLang}
-              onSelect={(lang) => { setSelectedLang(lang); setShowLangSelector(false); }}
-            />
-          )}
-        </div>
-      )}
-
-      <div className="absolute top-6 left-6 z-30">
-        <div className="flex flex-col gap-1">
+      <div className="absolute top-0 left-0 right-0 h-16 z-30 flex items-center justify-between px-6">
+        <div className="flex flex-col gap-0.5">
           <span className="font-display text-xs tracking-[0.25em] text-accent uppercase">ScrollAPI</span>
-          <span className="font-mono text-[10px] text-mist/70 tracking-wider max-w-48 truncate">{videoData.metadata.title}</span>
+          <span className="font-mono text-[10px] text-mist/70 tracking-wider max-w-xs truncate">{videoData.metadata.title}</span>
+        </div>
+
+        <div className="flex items-center gap-3">
+          {videoData.captions.length > 0 && (
+            <div className="relative">
+              <button
+                onClick={() => { setShowLangSelector(!showLangSelector); setShowControls(false); }}
+                className="flex items-center gap-2 px-3 py-1.5 bg-graphite/90 border border-white/8 rounded-lg font-mono text-xs tracking-wider text-mist hover:text-paper transition-colors"
+              >
+                <span className="w-1.5 h-1.5 rounded-full bg-accent" />
+                CC · {selectedLang.toUpperCase()}
+              </button>
+              {showLangSelector && (
+                <LanguageSelector
+                  tracks={videoData.captions}
+                  selected={selectedLang}
+                  onSelect={(lang) => { setSelectedLang(lang); setShowLangSelector(false); }}
+                />
+              )}
+            </div>
+          )}
+
+          <button
+            onClick={() => { setShowControls(!showControls); setShowLangSelector(false); }}
+            className={`flex items-center gap-2 px-3 py-1.5 border rounded-lg font-mono text-xs tracking-wider transition-colors ${showControls ? "bg-accent/20 border-accent/40 text-accent" : "bg-graphite/90 border-white/8 text-mist hover:text-paper"}`}
+          >
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+              <circle cx="6" cy="6" r="2.5" stroke="currentColor" strokeWidth="1.2" />
+              <path d="M6 1v1.5M6 9.5V11M1 6h1.5M9.5 6H11" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+            </svg>
+            Auto
+          </button>
         </div>
       </div>
 
       <AnimatePresence>
-        {!isScrolling && isReady && (
+        {showControls && (
+          <motion.div
+            initial={{ opacity: 0, y: -8, scale: 0.97 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -8, scale: 0.97 }}
+            transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+            className="absolute top-16 right-6 z-40 w-64 bg-graphite border border-white/8 rounded-xl overflow-hidden"
+            style={{ boxShadow: "0 16px 48px rgba(0,0,0,0.7)" }}
+          >
+            <div className="px-4 py-3 border-b border-white/6 flex items-center justify-between">
+              <span className="font-mono text-[9px] tracking-[0.35em] text-mist/60 uppercase">Auto-scroll speed</span>
+              <span className="font-mono text-xs text-accent tabular-nums">{autoSpeed.toFixed(2)}×</span>
+            </div>
+
+            <div className="px-4 py-4 flex flex-col gap-4">
+              <input
+                type="range"
+                min={0.25}
+                max={2.0}
+                step={0.05}
+                value={autoSpeed}
+                onChange={(e) => setAutoSpeed(parseFloat(e.target.value))}
+                className="w-full accent-amber-400 cursor-pointer"
+                style={{ accentColor: "#C8A96E" }}
+              />
+
+              <div className="grid grid-cols-4 gap-1">
+                {SPEED_PRESETS.map((s) => (
+                  <button
+                    key={s}
+                    onClick={() => setAutoSpeed(s)}
+                    className={`py-1.5 rounded-lg font-mono text-[10px] tracking-wide transition-colors ${autoSpeed === s ? "bg-accent/20 text-accent border border-accent/30" : "bg-lead/60 text-mist hover:text-paper border border-white/5"}`}
+                  >
+                    {s}×
+                  </button>
+                ))}
+              </div>
+
+              <button
+                onClick={() => { isAutoPlaying ? stopAutoPlay() : startAutoPlay(); }}
+                className={`w-full py-2.5 rounded-xl font-mono text-xs tracking-[0.2em] uppercase transition-all duration-200 ${isAutoPlaying ? "bg-signal/20 border border-signal/30 text-signal hover:bg-signal/30" : "bg-accent/90 hover:bg-accent text-ink font-600"}`}
+              >
+                {isAutoPlaying ? "■ Stop" : "▶ Play at " + autoSpeed + "×"}
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {isAutoPlaying && (
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-30 pointer-events-none">
+          <div className="flex items-center gap-3 px-4 py-2 rounded-xl bg-ink/80 border border-accent/20">
+            <div className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />
+            <span className="font-mono text-sm text-accent tabular-nums">{autoSpeed.toFixed(2)}×</span>
+            <span className="font-mono text-[9px] tracking-[0.3em] text-mist/60 uppercase">auto</span>
+          </div>
+        </div>
+      )}
+
+      <AnimatePresence>
+        {!isScrolling && !isAutoPlaying && isReady && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
