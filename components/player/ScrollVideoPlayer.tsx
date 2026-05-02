@@ -21,7 +21,6 @@ declare global {
 interface YTPlayer {
   seekTo: (seconds: number, allowSeekAhead: boolean) => void;
   setPlaybackRate: (rate: number) => void;
-  getPlaybackRate: () => number;
   playVideo: () => void;
   pauseVideo: () => void;
   getDuration: () => number;
@@ -38,6 +37,7 @@ const NORMAL_SCROLL_SPEED = 8;
 const MIN_PLAYBACK = 0.25;
 const MAX_PLAYBACK = 2.0;
 const IDLE_MS = 100;
+const SPEED_PRESETS = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
 
 export default function ScrollVideoPlayer({ videoData }: ScrollVideoPlayerProps) {
   const playerRef = useRef<YTPlayer | null>(null);
@@ -46,7 +46,6 @@ export default function ScrollVideoPlayer({ videoData }: ScrollVideoPlayerProps)
   const isReadyRef = useRef(false);
   const lastScrollTimeRef = useRef(performance.now());
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const autoScrollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const [progress, setProgress] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
@@ -74,30 +73,22 @@ export default function ScrollVideoPlayer({ videoData }: ScrollVideoPlayerProps)
     idleTimerRef.current = setTimeout(stopVideo, IDLE_MS);
   }, [stopVideo]);
 
-  const startAutoPlay = useCallback(() => {
+  const startAutoPlay = useCallback((speed: number) => {
     const player = playerRef.current;
     if (!player || !isReadyRef.current) return;
-    if (autoScrollRef.current) clearInterval(autoScrollRef.current);
     try {
-      player.setPlaybackRate(autoSpeed);
+      player.setPlaybackRate(speed);
       player.playVideo();
-      setPlaybackRate(autoSpeed);
+      setPlaybackRate(speed);
       setIsScrolling(true);
       setIsAutoPlaying(true);
     } catch {}
-  }, [autoSpeed]);
+  }, []);
 
   const stopAutoPlay = useCallback(() => {
-    if (autoScrollRef.current) clearInterval(autoScrollRef.current);
     setIsAutoPlaying(false);
     stopVideo();
   }, [stopVideo]);
-
-  useEffect(() => {
-    if (isAutoPlaying) {
-      startAutoPlay();
-    }
-  }, [autoSpeed, isAutoPlaying, startAutoPlay]);
 
   const rafLoop = useCallback(() => {
     const player = playerRef.current;
@@ -107,8 +98,7 @@ export default function ScrollVideoPlayer({ videoData }: ScrollVideoPlayerProps)
         const dur = player.getDuration() || 1;
         setCurrentTime(t);
         setProgress(t / dur);
-        const cue = getActiveCue(activeCaptions, t);
-        setActiveCaption(cue);
+        setActiveCaption(getActiveCue(activeCaptions, t));
       } catch {}
     }
     rafRef.current = requestAnimationFrame(rafLoop);
@@ -120,15 +110,7 @@ export default function ScrollVideoPlayer({ videoData }: ScrollVideoPlayerProps)
   }, [rafLoop]);
 
   useEffect(() => {
-    const loadApi = () => {
-      if (window.YT?.Player) { initPlayer(); return; }
-      const tag = document.createElement("script");
-      tag.src = "https://www.youtube.com/iframe_api";
-      document.head.appendChild(tag);
-      window.onYouTubeIframeAPIReady = initPlayer;
-    };
-
-    const initPlayer = () => {
+    const init = () => {
       if (!containerRef.current) return;
       const div = document.createElement("div");
       containerRef.current.appendChild(div);
@@ -146,8 +128,7 @@ export default function ScrollVideoPlayer({ videoData }: ScrollVideoPlayerProps)
           showinfo: 0,
           playsinline: 1,
           cc_load_policy: 0,
-          cc_lang_pref: "",
-          hl: "en",
+          origin: window.location.origin,
         },
         events: {
           onReady: () => {
@@ -158,13 +139,19 @@ export default function ScrollVideoPlayer({ videoData }: ScrollVideoPlayerProps)
       });
     };
 
-    loadApi();
+    if (window.YT?.Player) {
+      init();
+    } else {
+      const tag = document.createElement("script");
+      tag.src = "https://www.youtube.com/iframe_api";
+      document.head.appendChild(tag);
+      window.onYouTubeIframeAPIReady = init;
+    }
 
     return () => {
       try { playerRef.current?.destroy(); } catch {}
       cancelAnimationFrame(rafRef.current);
       if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
-      if (autoScrollRef.current) clearInterval(autoScrollRef.current);
     };
   }, [videoData.videoId]);
 
@@ -172,7 +159,6 @@ export default function ScrollVideoPlayer({ videoData }: ScrollVideoPlayerProps)
     const handleWheel = (e: WheelEvent) => {
       e.preventDefault();
       if (isAutoPlaying) stopAutoPlay();
-
       const player = playerRef.current;
       if (!player || !isReadyRef.current) return;
 
@@ -183,18 +169,15 @@ export default function ScrollVideoPlayer({ videoData }: ScrollVideoPlayerProps)
 
       if (Math.abs(dy) < 0.5) { scheduleStop(); return; }
 
-      const pixelsPerMs = Math.abs(dy) / dt;
-      const rate = Math.max(MIN_PLAYBACK, Math.min(MAX_PLAYBACK, pixelsPerMs / NORMAL_SCROLL_SPEED));
-      const direction = dy > 0 ? 1 : -1;
+      const rate = Math.max(MIN_PLAYBACK, Math.min(MAX_PLAYBACK, (Math.abs(dy) / dt) / NORMAL_SCROLL_SPEED));
 
       if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
       setIsScrolling(true);
 
       try {
-        if (direction === -1) {
+        if (dy < 0) {
           player.pauseVideo();
-          const newTime = Math.max(0, player.getCurrentTime() - rate * (dt / 1000) * 4);
-          player.seekTo(newTime, true);
+          player.seekTo(Math.max(0, player.getCurrentTime() - rate * (dt / 1000) * 4), true);
           setPlaybackRate(-rate);
         } else {
           player.setPlaybackRate(rate);
@@ -209,13 +192,13 @@ export default function ScrollVideoPlayer({ videoData }: ScrollVideoPlayerProps)
     let lastTouchY = 0;
     let lastTouchTime = 0;
 
-    const handleTouchStart = (e: TouchEvent) => {
+    const onTouchStart = (e: TouchEvent) => {
       lastTouchY = e.touches[0].clientY;
       lastTouchTime = performance.now();
       if (isAutoPlaying) stopAutoPlay();
     };
 
-    const handleTouchMove = (e: TouchEvent) => {
+    const onTouchMove = (e: TouchEvent) => {
       e.preventDefault();
       const player = playerRef.current;
       if (!player || !isReadyRef.current) return;
@@ -229,16 +212,14 @@ export default function ScrollVideoPlayer({ videoData }: ScrollVideoPlayerProps)
       if (Math.abs(dy) < 1) { scheduleStop(); return; }
 
       const rate = Math.max(MIN_PLAYBACK, Math.min(MAX_PLAYBACK, Math.abs(dy / dt) / (NORMAL_SCROLL_SPEED * 0.5)));
-      const direction = dy > 0 ? 1 : -1;
 
       if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
       setIsScrolling(true);
 
       try {
-        if (direction === -1) {
+        if (dy < 0) {
           player.pauseVideo();
-          const newTime = Math.max(0, player.getCurrentTime() - rate * (dt / 1000) * 4);
-          player.seekTo(newTime, true);
+          player.seekTo(Math.max(0, player.getCurrentTime() - rate * (dt / 1000) * 4), true);
           setPlaybackRate(-rate);
         } else {
           player.setPlaybackRate(rate);
@@ -251,66 +232,67 @@ export default function ScrollVideoPlayer({ videoData }: ScrollVideoPlayerProps)
     };
 
     window.addEventListener("wheel", handleWheel, { passive: false });
-    window.addEventListener("touchstart", handleTouchStart, { passive: true });
-    window.addEventListener("touchmove", handleTouchMove, { passive: false });
+    window.addEventListener("touchstart", onTouchStart, { passive: true });
+    window.addEventListener("touchmove", onTouchMove, { passive: false });
     window.addEventListener("touchend", scheduleStop, { passive: true });
 
     return () => {
       window.removeEventListener("wheel", handleWheel);
-      window.removeEventListener("touchstart", handleTouchStart);
-      window.removeEventListener("touchmove", handleTouchMove);
+      window.removeEventListener("touchstart", onTouchStart);
+      window.removeEventListener("touchmove", onTouchMove);
       window.removeEventListener("touchend", scheduleStop);
     };
   }, [scheduleStop, isAutoPlaying, stopAutoPlay]);
 
-  const rateLabel = (() => {
-    if (playbackRate === 0) return null;
-    const abs = Math.abs(playbackRate);
-    const dir = playbackRate < 0 ? "◀ " : "";
-    return `${dir}${abs.toFixed(2)}×`;
-  })();
-
-  const SPEED_PRESETS = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
+  const rateLabel = playbackRate === 0 ? null
+    : `${playbackRate < 0 ? "◀ " : ""}${Math.abs(playbackRate).toFixed(2)}×`;
 
   return (
-    <div className="relative w-full h-screen overflow-hidden bg-ink">
-      <div
-        ref={containerRef}
-        className="absolute w-full h-full [&>*]:w-full [&>*]:h-full [&_iframe]:w-full [&_iframe]:h-full"
-        style={{ pointerEvents: "none", top: 0, left: 0 }}
-      />
+    <div className="relative w-full h-screen bg-ink overflow-hidden">
 
       <div
-        className="absolute inset-0 z-10"
-        style={{ pointerEvents: "none" }}
+        className="absolute pointer-events-none"
+        style={{
+          top: "-15%",
+          left: "-15%",
+          width: "130%",
+          height: "130%",
+          overflow: "hidden",
+        }}
       >
-        <div className="absolute top-0 left-0 right-0 h-16 bg-ink" />
-        <div className="absolute bottom-0 left-0 right-0 h-36 bg-ink" />
-        <div className="absolute top-0 bottom-0 left-0 w-2 bg-ink" />
-        <div className="absolute top-0 bottom-0 right-0 w-2 bg-ink" />
-        <div className="absolute inset-0 bg-gradient-to-t from-ink/40 via-transparent to-transparent" />
+        <div
+          ref={containerRef}
+          className="w-full h-full [&>*]:w-full [&>*]:h-full [&_iframe]:w-full [&_iframe]:h-full [&_iframe]:border-0"
+        />
       </div>
 
-      {!isReady && (
-        <div className="absolute inset-0 flex items-center justify-center bg-ink z-20">
-          <div className="flex flex-col items-center gap-6">
-            <div className="relative w-16 h-16">
-              <div className="absolute inset-0 border border-accent/30 rounded-full animate-ping" />
-              <div className="absolute inset-2 border border-accent/60 rounded-full" />
-              <div className="absolute inset-4 bg-accent/20 rounded-full" />
+      <AnimatePresence>
+        {!isReady && (
+          <motion.div
+            initial={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.4 }}
+            className="absolute inset-0 flex items-center justify-center bg-ink z-20"
+          >
+            <div className="flex flex-col items-center gap-6">
+              <div className="relative w-16 h-16">
+                <div className="absolute inset-0 border border-accent/30 rounded-full animate-ping" />
+                <div className="absolute inset-2 border border-accent/60 rounded-full" />
+                <div className="absolute inset-4 bg-accent/20 rounded-full" />
+              </div>
+              <span className="font-mono text-xs tracking-[0.3em] text-mist uppercase">Loading</span>
             </div>
-            <span className="font-mono text-xs tracking-[0.3em] text-mist uppercase">Loading</span>
-          </div>
-        </div>
-      )}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <div className="absolute inset-0 pointer-events-none z-10">
+        <div className="absolute inset-0 bg-gradient-to-t from-ink/50 via-transparent to-transparent" />
+      </div>
 
       <div className="absolute inset-0 z-20 pointer-events-none">
         <SubtitleDisplay caption={activeCaption} />
-        <ProgressIndicator
-          progress={progress}
-          duration={videoData.metadata.duration}
-          currentTime={currentTime}
-        />
+        <ProgressIndicator progress={progress} duration={videoData.metadata.duration} currentTime={currentTime} />
       </div>
 
       <AnimatePresence>
@@ -332,13 +314,25 @@ export default function ScrollVideoPlayer({ videoData }: ScrollVideoPlayerProps)
         )}
       </AnimatePresence>
 
-      <div className="absolute top-0 left-0 right-0 h-16 z-30 flex items-center justify-between px-6">
+      {isAutoPlaying && (
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-30 pointer-events-none">
+          <div className="flex items-center gap-3 px-4 py-2 rounded-xl bg-ink/80 border border-accent/20">
+            <div className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />
+            <span className="font-mono text-sm text-accent tabular-nums">{autoSpeed.toFixed(2)}×</span>
+            <span className="font-mono text-[9px] tracking-[0.3em] text-mist/60 uppercase">auto</span>
+          </div>
+        </div>
+      )}
+
+      <div className="absolute top-0 left-0 right-0 h-14 z-30 flex items-center justify-between px-6">
         <div className="flex flex-col gap-0.5">
           <span className="font-display text-xs tracking-[0.25em] text-accent uppercase">ScrollAPI</span>
-          <span className="font-mono text-[10px] text-mist/70 tracking-wider max-w-xs truncate">{videoData.metadata.title}</span>
+          <span className="font-mono text-[10px] text-mist/70 tracking-wider max-w-xs truncate">
+            {videoData.metadata.title}
+          </span>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
           {videoData.captions.length > 0 && (
             <div className="relative">
               <button
@@ -362,7 +356,7 @@ export default function ScrollVideoPlayer({ videoData }: ScrollVideoPlayerProps)
             onClick={() => { setShowControls(!showControls); setShowLangSelector(false); }}
             className={`flex items-center gap-2 px-3 py-1.5 border rounded-lg font-mono text-xs tracking-wider transition-colors ${showControls ? "bg-accent/20 border-accent/40 text-accent" : "bg-graphite/90 border-white/8 text-mist hover:text-paper"}`}
           >
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+            <svg width="11" height="11" viewBox="0 0 12 12" fill="none">
               <circle cx="6" cy="6" r="2.5" stroke="currentColor" strokeWidth="1.2" />
               <path d="M6 1v1.5M6 9.5V11M1 6h1.5M9.5 6H11" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
             </svg>
@@ -378,7 +372,7 @@ export default function ScrollVideoPlayer({ videoData }: ScrollVideoPlayerProps)
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -8, scale: 0.97 }}
             transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
-            className="absolute top-16 right-6 z-40 w-64 bg-graphite border border-white/8 rounded-xl overflow-hidden"
+            className="absolute top-14 right-6 z-40 w-64 bg-graphite border border-white/8 rounded-xl overflow-hidden"
             style={{ boxShadow: "0 16px 48px rgba(0,0,0,0.7)" }}
           >
             <div className="px-4 py-3 border-b border-white/6 flex items-center justify-between">
@@ -394,7 +388,7 @@ export default function ScrollVideoPlayer({ videoData }: ScrollVideoPlayerProps)
                 step={0.05}
                 value={autoSpeed}
                 onChange={(e) => setAutoSpeed(parseFloat(e.target.value))}
-                className="w-full accent-amber-400 cursor-pointer"
+                className="w-full cursor-pointer"
                 style={{ accentColor: "#C8A96E" }}
               />
 
@@ -411,25 +405,15 @@ export default function ScrollVideoPlayer({ videoData }: ScrollVideoPlayerProps)
               </div>
 
               <button
-                onClick={() => { isAutoPlaying ? stopAutoPlay() : startAutoPlay(); }}
-                className={`w-full py-2.5 rounded-xl font-mono text-xs tracking-[0.2em] uppercase transition-all duration-200 ${isAutoPlaying ? "bg-signal/20 border border-signal/30 text-signal hover:bg-signal/30" : "bg-accent/90 hover:bg-accent text-ink font-600"}`}
+                onClick={() => { isAutoPlaying ? stopAutoPlay() : startAutoPlay(autoSpeed); }}
+                className={`w-full py-2.5 rounded-xl font-mono text-xs tracking-[0.2em] uppercase transition-all duration-200 ${isAutoPlaying ? "bg-signal/20 border border-signal/30 text-signal hover:bg-signal/30" : "bg-accent/90 hover:bg-accent text-ink"}`}
               >
-                {isAutoPlaying ? "■ Stop" : "▶ Play at " + autoSpeed + "×"}
+                {isAutoPlaying ? "■  Stop" : `▶  Play at ${autoSpeed}×`}
               </button>
             </div>
           </motion.div>
         )}
       </AnimatePresence>
-
-      {isAutoPlaying && (
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-30 pointer-events-none">
-          <div className="flex items-center gap-3 px-4 py-2 rounded-xl bg-ink/80 border border-accent/20">
-            <div className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />
-            <span className="font-mono text-sm text-accent tabular-nums">{autoSpeed.toFixed(2)}×</span>
-            <span className="font-mono text-[9px] tracking-[0.3em] text-mist/60 uppercase">auto</span>
-          </div>
-        </div>
-      )}
 
       <AnimatePresence>
         {!isScrolling && !isAutoPlaying && isReady && (
@@ -437,7 +421,7 @@ export default function ScrollVideoPlayer({ videoData }: ScrollVideoPlayerProps)
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            transition={{ duration: 0.6, delay: 0.8 }}
+            transition={{ duration: 0.6, delay: 1 }}
             className="absolute bottom-32 left-1/2 -translate-x-1/2 z-30 pointer-events-none flex flex-col items-center gap-3"
           >
             <span className="font-mono text-[9px] tracking-[0.4em] text-mist/50 uppercase">Scroll to play</span>
